@@ -1,0 +1,94 @@
+; @ 前缀，表示全局变量
+; dso_local 表示 该变量在当前的动态共享对象 (dynamic shared object, dso) 中是本地的，有助于优化，因为 linker 可以假设：没有其他 DSO 会修改这个变量
+; global 表示 全局变量的定义
+; i32 表示 变量类型
+; 0 表示 初始值是 0
+; align 4 表示 变量应该 4 字节对齐
+; 既然已经有了 @ ，为什么还要一个 global 呢？ @ 全局变量、函数名。 global 全局变量、define 函数名
+; 除了 global 还有其他类型的全局变量定义：
+;	@x = external global i32 外部链接的 全局变量
+;	@x = constant i32 0, align 4 全局常量
+@x = dso_local global i32 0, align 4
+@y = dso_local global i32 0, align 4
+
+; @ 前缀，全局
+; .str 、 .str.1 、 .str.2 ， 第一个 . 含有 匿名变量 或者是 私有变量 的语义；第二个 . 通常是 为了防止命名冲突加上的
+; private 只能在当前 module 中访问
+; 15 x i8 字符数组
+@.str = private unnamed_addr constant [15 x i8] c"result \E4\B8\BA: %d\00", align 1 ; "result 为: %d", result
+@.str.1 = private unnamed_addr constant [12 x i8] c"hello world\00", align 1
+@.str.2 = private unnamed_addr constant [5 x i8] c"fuck\00", align 1
+
+; int addtwonum()
+; {
+	; 就是注意一件事情，就是对于声明，其实 汇编 和 IR 都没有做什么，只是 dummy 的预留的一段空间（这不会在代码中体现），但是存储的时候，可能就是 sd a0, -32(a1)
+;     extern int x; ;     x = 1;
+;     extern int y; ;     y = 2;
+;     return x + y;
+; }
+
+; define 定义一个函数
+; dso_local dynamic shared object 优化器假设： 该函数不会被其他 DSO 中的代码直接调用
+; signext 如果 返回类型 小于调用者的整数类型 => 那么返回值会被 符号拓展到 调用者的整数类型大小
+; i32 返回类型
+; @addtwonum() 函数名为 addtwonum ，不接受任何参数
+define dso_local signext i32 @addtwonum() {
+
+; entry 函数的入口标签，标志着： 函数指令的开始
+entry:
+  
+  ; store <type> <num>, <where> [, align <num> ] 尽管 [, align <num> ] 是可选项，但是尽量还是加入
+  ;		方便跨平台。如果不加入 align ，那么就是按照 目标平台默认的对齐方式，目标平台默认的对齐方式是不可知的
+  ; 全局变量、函数 在 LLVM IR 中，都是类似 指针的方式引用的。
+  store i32 1, ptr @x, align 4
+  store i32 2, ptr @y, align 4
+  %0 = load i32, ptr @x, align 4
+  %1 = load i32, ptr @y, align 4
+
+  ; (no signed wrap, nsw) 表示: 对于这次加法操作，假定他不会导致 有符号溢出。
+  ;		如果加法的结果超出了 i32 类型的表示范围，并且发生了 有符号溢出，那么结果是未定义的。允许编译器进行某些优化
+  %add = add nsw i32 %0, %1
+  ret i32 %add
+}
+
+define dso_local signext i32 @main() {
+entry:
+  ; alloca i32 在 栈上分配内存，用于 i32
+  %retval = alloca i32, align 4
+  %result = alloca i32, align 4
+
+  ; 发现一件事情：不只是 全局变量在 编译器眼中是 ptr ， 就连 栈上的变量，编译器眼中依然是 ptr
+  store i32 0, ptr %retval, align 4
+
+  ; 用于调试的声明(llvm.dbg.declare)
+  ; TODO
+  tail call void @llvm.dbg.declare(metadata ptr %result, metadata !38, metadata !DIExpression())
+  
+  ; 推荐是： define 方有 signext ，那么 caller 方也要有 signext
+  %call = call signext i32 @addtwonum()
+  store i32 %call, ptr %result, align 4
+  %0 = load i32, ptr %result, align 4
+
+  ; %call1 用来存放返回值
+  ; call 调用
+  ; signext 也是推荐有这个，咱们就当做是 函数签名的一部分
+  ; printf 的函数签名是： signext i32 (ptr, ...) @printf
+  ; 	ptr 表示 第一个参数是 指针类型， 也就是这里的格式串
+  ; 	... 表示 printf 可以接受可变数量的参数
+  ; 参数1: ptr noundef @.str
+  ; 	ptr 表明类型是 指向字符串的指针
+  ; 	noundef 是一个属性，表示 这个参数在调用的时候，不能是一个 未定义的 (no undefine, no udef)
+  ; 参数2: i32 noudef signext %0 
+  ;		signext: 这里的实参是 %0 ，可能形参要比实参大，那么符号拓展
+  %call1 = call signext i32 (ptr, ...) @printf(ptr noundef @.str, i32 noundef signext %0)
+  ret i32 0
+}
+
+; declare 用于 声明一个 函数 或 全局变量，但是不定义它。这意味着函数的实现不在当前的代码文件中
+; @llvm.dgb.declare: llvm 的内置函数，用于插入调试信息
+; metadata: llvm ir 中的类型，用于携带调试信息，注释等
+; #1 是属性组的标识，他定义了函数的或调用的附加属性。比方说：不进行 inline 、优化级别等
+declare void @llvm.dbg.declare(metadata, metadata, metadata) #1
+
+declare signext i32 @printf(ptr noundef, ...) #2
+
